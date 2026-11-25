@@ -1,11 +1,11 @@
 // Pump.fun Sharpe Sprint: High-Sharpe momentum sniper with creator buy verification
-// Clean zero-dependency TypeScript entrypoint running natively under Node 22 (revision 2)
+// Clean zero-dependency TypeScript entrypoint running natively under Node 22 (engine v1.1)
 
-import { runBot } from './vendor/makefun-bot.ts';
-import { createStrategy, DEFAULT_PARAMS } from './strategy.ts';
+import { runBot, type Batch, type BotState, type OrderInput } from './vendor/makefun-bot.ts';
+import { SniperEngine, DEFAULT_CONFIG } from './strategy.ts';
 
-const strategy = createStrategy(DEFAULT_PARAMS);
+const engine = new SniperEngine(DEFAULT_CONFIG);
 
 await runBot({
-  onBatch: (state, batch) => strategy.onBatch(state, batch),
+  onBatch: (state: BotState, batch: Batch): OrderInput[] => engine.evaluateBatch(state, batch),
 });
