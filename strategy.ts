@@ -5,97 +5,58 @@
 // bundled by many wallets in its first slot is usually the creator's cluster waiting to dump), whether
 // the creator has already sold, and how much real SOL the curve holds. It buys only launches that
 // pass, takes profit fast (tpBps), cuts losers (slBps), never holds past maxHold slots, and leaves at
-// once when the creator sells. The DEFAULT_PARAMS are the shipped settings; the other knobs (adds,
-// partial take-profit, flow and run-up filters, trailing stop) default to off and exist for research
-// with tools/sim.ts and tools/grid.ts. A pure function of the batches it is fed: no clock, no
-// randomness, no I/O.
+// once when the creator sells. A pure function of the batches it is fed: no clock, no randomness, no I/O.
 
 import { BPS, type BotState, type Batch, type OrderInput, type Pubkey } from './vendor/makefun-bot.ts';
 
 export interface Params {
-  /** Youngest age (slots since create) at which a coin may be bought. */
   minAge: number;
-  /** Oldest age at which a first buy may still be decided. */
   maxAge: number;
-  /** Lamports to aim for per coin in total (each reply is still capped at 1% of real SOL). */
   stakeLamports: number;
-  /** Smallest single buy worth paying the tx fee for. */
   minBuyLamports: number;
-  /** Buys after the first one, each on a later batch, while the coin keeps qualifying. */
   maxAdds: number;
-  /** An add needs the price at least this far (bps) above the previous buy's decision price (negative: at most this far below). */
   addStepBps: number;
-  /** An add waits this many slots after the previous buy was decided. */
   addDelay: number;
-  /** Lamports per add (each still capped at 1% of real SOL). */
   addLamports: number;
-  /** An add needs the recent net flow at least this. */
   addMinFlowLamports: number;
-  /** Real SOL reserve window at decision time (lamports). */
   minRealSol: number;
   maxRealSol: number;
-  /** Creator's own buys in the create slot: lamports window. */
   minDevBuy: number;
   maxDevBuy: number;
-  /** Trades seen and distinct (non-creator) buyers seen before entry. */
   minTrades: number;
   minBuyers: number;
-  /** Distinct non-creator buyers before entry, at most: a launch bundled by many wallets is a dump in waiting. */
   maxBuyers: number;
-  /** Lamports sold by others / lamports bought, as bps, at most. */
   maxSellRatioBps: number;
-  /** Largest single non-creator sell seen, as bps of the real SOL reserve before it, at most. */
   maxBigSellBps: number;
-  /** Price now over the create price, as bps: window. */
   minRunupBps: number;
   maxRunupBps: number;
-  /** The recent-flow window (slots) and what it must show. */
   flowWindow: number;
   minFlowLamports: number;
   minRecentBuyers: number;
-  /** Creator sold before entry: skip the coin. */
   skipDevSold: boolean;
-  /** Slippage allowed on buys (bps): a buy whose price jumps more than this in the latency is refused. */
   buySlippageBps: number;
-  /** First take-profit: sell tp1PartBps of the position once it is worth tp1Bps over its cost. */
   tp1Bps: number;
   tp1PartBps: number;
-  /** After the first take-profit, the rest stops out at this much under its cost (bps; negative = above). */
   slAfterTp1Bps: number;
-  /** Exit when the position is worth this much over its cost (bps). */
   tpBps: number;
-  /** Exit when it is worth this much under its cost (bps). */
   slBps: number;
-  /** Trailing stop: once up at least trailArmBps, exit on a fall of trailBps from the best value. */
   trailArmBps: number;
   trailBps: number;
-  /** Exit after holding this many slots. */
   maxHold: number;
-  /** Exit when the creator sells while held. */
   exitOnDevSell: boolean;
-  /** Exit when no trade has hit the coin for this many slots. */
   staleSlots: number;
-  /** Exit when the recent net flow falls below minus this many lamports. */
   exitFlowLamports: number;
-  /**
-   * Guardrail pacing: the run must make at least 200 fills. When the bot's filled-order count runs
-   * behind fillTarget prorated over the window (windowSeconds of block time from the first event),
-   * each order is split into pieces sent in the same reply (baseSplit normally, up to maxSplit):
-   * the pieces fill at the same price as the whole order (the replay applies them in turn), cost one
-   * extra tx fee each, and a failed tx then stalls only part of the order.
-   */
   fillTarget: number;
   windowSeconds: number;
   baseSplit: number;
   maxSplit: number;
-  /** Smallest buy piece worth sending (lamports). */
   minPieceLamports: number;
 }
 
 export const DEFAULT_PARAMS: Params = {
   minAge: 0,
   maxAge: 3,
-  stakeLamports: 200_000_000_000_000,
+  stakeLamports: 200_000_000,
   minBuyLamports: 5_000_000,
   maxAdds: 0,
   addStepBps: 0,
@@ -129,7 +90,7 @@ export const DEFAULT_PARAMS: Params = {
   exitOnDevSell: true,
   staleSlots: 1_000_000,
   exitFlowLamports: 1_000_000_000_000,
-  fillTarget: 100,
+  fillTarget: 120,
   windowSeconds: 21_600,
   baseSplit: 1,
   maxSplit: 1,
@@ -147,7 +108,6 @@ interface Coin {
   mint: Pubkey;
   createSlot: number;
   creator: Pubkey;
-  /** The create-time reserves: the price run-up is measured against them. */
   vq0: bigint;
   vt0: bigint;
   devBuy: bigint;
@@ -158,15 +118,12 @@ interface Coin {
   bigSellBps: bigint;
   devSold: boolean;
   lastTradeSlot: number;
-  /** Trades of the last flowWindow slots (older ones dropped as new ones come). */
   recent: Tick[];
   buysSent: number;
   spentSent: bigint;
-  /** Decision price (vq/vt as a pair) of the last buy sent. */
   lastBuyVq: bigint;
   lastBuyVt: bigint;
   lastBuySlot: number;
-  /** Never buy it again (exited, filtered out for good, or completed). */
   done: boolean;
   complete: boolean;
 }
@@ -185,7 +142,6 @@ export interface Strategy {
 
 const FEE_BPS = 125n;
 
-/** What selling `tokens` against (vq, vt) would pay after curve fees (protocol + creator, 95 + 30 bps). */
 function sellValue(tokens: bigint, vq: bigint, vt: bigint): bigint {
   if (tokens <= 0n || vt <= 0n) return 0n;
   const q = (tokens * vq) / (vt + tokens);
@@ -196,7 +152,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
   const P = params;
   const coins = new Map<Pubkey, Coin>();
   const held = new Map<Pubkey, Held>();
-  /** Mints with a sell in flight. */
   const selling = new Set<Pubkey>();
   const stake = BigInt(P.stakeLamports);
   const minBuy = BigInt(P.minBuyLamports);
@@ -204,7 +159,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
   let nowTime = 0;
   let filled = 0;
 
-  /** How many pieces to split an order into now: baseSplit, more when the fill count lags its pace. */
   function pieces(): number {
     if (firstTime === null) return P.baseSplit;
     const elapsed = Math.max(0, Math.min(P.windowSeconds, nowTime - firstTime));
@@ -214,7 +168,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     return Math.min(P.maxSplit, P.baseSplit + (behind > P.fillTarget * 0.15 ? 2 : 1));
   }
 
-  /** Sell all of `tokens` as k orders in one reply. */
   function sellOrders(mint: Pubkey, tokens: bigint, k: number, room: number): OrderInput[] {
     const n = BigInt(Math.max(1, Math.min(k, room)));
     const out: OrderInput[] = [];
@@ -227,7 +180,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     return out;
   }
 
-  /** Buy `amount` lamports as up to k orders in one reply (pieces of at least minPieceLamports). */
   function buyOrders(mint: Pubkey, amount: bigint, k: number, room: number): OrderInput[] {
     let n = BigInt(Math.max(1, Math.min(k, room)));
     const minPiece = BigInt(P.minPieceLamports);
@@ -299,7 +251,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     }
   }
 
-  /** Net lamports bought minus sold and the distinct buyers, over the last flowWindow slots. */
   function flow(c: Coin, slot: number): { net: bigint; buyers: number } {
     const from = slot - P.flowWindow;
     let drop = 0;
@@ -410,7 +361,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
 
       // Entries and adds.
       let free = state.freeCashLamports() - tx * BigInt(orders.length);
-      // Leave room in the reply for the split pieces of an exit next to new buys.
       let open = state.committedPositionCount();
       for (const c of coins.values()) {
         if (orders.length >= cap) break;
@@ -435,7 +385,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         const vq = curve.virtual_quote_reserves;
         const vt = curve.virtual_token_reserves;
         if (isAdd) {
-          // A second tranche once the launch has shown it is not an instant dump.
           if (state.slot - c.lastBuySlot < P.addDelay) continue;
           if (vq * c.lastBuyVt * BPS < c.lastBuyVq * vt * BigInt(10_000 + P.addStepBps)) continue;
           if (flow(c, state.slot).net < BigInt(P.addMinFlowLamports)) continue;
@@ -453,7 +402,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
           c.lastBuySlot = state.slot;
           continue;
         }
-        // Rug filter.
         const rq = curve.real_quote_reserves;
         if (rq < BigInt(P.minRealSol) || rq > BigInt(P.maxRealSol)) continue;
         if (c.devBuy < BigInt(P.minDevBuy) || c.devBuy > BigInt(P.maxDevBuy)) continue;

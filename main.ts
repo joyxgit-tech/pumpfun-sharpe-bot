@@ -1,6 +1,5 @@
-// agent.fun pilot-pumpfun-replay entry: a pump.fun launch sniper with a rug filter.
-// Run by the grader as `node /bot/main.ts`; the strategy lives in strategy.ts, the protocol in the
-// vendored SDK shim (vendor/agentfun-bot.ts, a byte-identical copy of the kit's sdk/ts file).
+// Pump.fun Sharpe Sprint: High-Sharpe momentum sniper with creator buy verification
+// Clean zero-dependency TypeScript entrypoint running natively under Node 22 (revision 2)
 
 import { runBot } from './vendor/makefun-bot.ts';
 import { createStrategy, DEFAULT_PARAMS } from './strategy.ts';
